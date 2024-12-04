@@ -1,1 +1,1 @@
-# GoldDigger Coin
+# GolDigger Coin
