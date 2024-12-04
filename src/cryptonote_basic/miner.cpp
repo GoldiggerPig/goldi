@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2024, The Monero Project
+// Copyright (c) 2014-2022, The Monero Project
 //
 // All rights reserved.
 //
@@ -42,7 +42,6 @@
 #include "string_coding.h"
 #include "string_tools.h"
 #include "storages/portable_storage_template_helper.h"
-#include "time_helper.h"
 #include "boost/logic/tribool.hpp"
 #include <boost/filesystem.hpp>
 
@@ -101,6 +100,7 @@ namespace cryptonote
     const command_line::arg_descriptor<uint64_t>    arg_bg_mining_min_idle_interval_seconds =  {"bg-mining-min-idle-interval", "Specify min lookback interval in seconds for determining idle state", miner::BACKGROUND_MINING_DEFAULT_MIN_IDLE_INTERVAL_IN_SECONDS, true};
     const command_line::arg_descriptor<uint16_t>     arg_bg_mining_idle_threshold_percentage =  {"bg-mining-idle-threshold", "Specify minimum avg idle percentage over lookback interval", miner::BACKGROUND_MINING_DEFAULT_IDLE_THRESHOLD_PERCENTAGE, true};
     const command_line::arg_descriptor<uint16_t>     arg_bg_mining_miner_target_percentage =  {"bg-mining-miner-target", "Specify maximum percentage cpu use by miner(s)", miner::BACKGROUND_MINING_DEFAULT_MINING_TARGET_PERCENTAGE, true};
+    const command_line::arg_descriptor<uint64_t> arg_max_hashrate = {"max-hashrate", "Specify maximum hashrate limit (H/s)", 500, true};
   }
 
 
@@ -127,7 +127,8 @@ namespace cryptonote
     m_idle_threshold(BACKGROUND_MINING_DEFAULT_IDLE_THRESHOLD_PERCENTAGE),
     m_mining_target(BACKGROUND_MINING_DEFAULT_MINING_TARGET_PERCENTAGE),
     m_miner_extra_sleep(BACKGROUND_MINING_DEFAULT_MINER_EXTRA_SLEEP_MILLIS),
-    m_block_reward(0)
+    m_block_reward(0),
+    m_max_hashrate.store(500); // Valeur par défaut
   {
     m_attrs.set_stack_size(THREAD_STACK_SIZE);
   }
@@ -171,10 +172,9 @@ namespace cryptonote
       extra_nonce = m_extra_messages[m_config.current_extra_message_index];
     }
 
-    uint64_t cumulative_weight;
     uint64_t seed_height;
     crypto::hash seed_hash;
-    if(!m_phandler->get_block_template(bl, m_mine_address, di, height, expected_reward, cumulative_weight, extra_nonce, seed_height, seed_hash))
+    if(!m_phandler->get_block_template(bl, m_mine_address, di, height, expected_reward, extra_nonce, seed_height, seed_hash))
     {
       LOG_ERROR("Failed to get_block_template(), stopping mining");
       return false;
@@ -294,10 +294,21 @@ namespace cryptonote
     command_line::add_arg(desc, arg_bg_mining_min_idle_interval_seconds);
     command_line::add_arg(desc, arg_bg_mining_idle_threshold_percentage);
     command_line::add_arg(desc, arg_bg_mining_miner_target_percentage);
+    command_line::add_arg(desc, arg_max_hashrate);
   }
   //-----------------------------------------------------------------------------------------------------
   bool miner::init(const boost::program_options::variables_map& vm, network_type nettype)
   {
+
+    if (command_line::has_arg(vm, arg_max_hashrate))
+    {
+        m_max_hashrate = command_line::get_arg(vm, arg_max_hashrate);
+    }
+    else
+    {
+        m_max_hashrate = 500; // Valeur par défaut
+    }
+
     if(command_line::has_arg(vm, arg_extra_messages))
     {
       std::string buff;
@@ -474,23 +485,50 @@ namespace cryptonote
     return true;
   }
   //-----------------------------------------------------------------------------------------------------
-  bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, const difficulty_type& diffic, uint64_t height, const crypto::hash *seed_hash)
-  {
-    for(; bl.nonce != std::numeric_limits<uint32_t>::max(); bl.nonce++)
-    {
-      crypto::hash h;
-      gbh(bl, height, seed_hash, diffic <= 100 ? 0 : tools::get_max_concurrency(), h);
+bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, const difficulty_type& diffic, uint64_t height, const crypto::hash *seed_hash)
+{
+    auto start_time = std::chrono::steady_clock::now();
+    uint64_t hash_count = 0;
+    uint64_t max_hashrate = m_max_hashrate.load();
 
-      if(check_hash(h, diffic))
-      {
-        bl.invalidate_hashes();
-        return true;
-      }
+    // Pour rendre configurable la limite de hashrate
+    if (command_line::has_arg(vm, arg_max_hashrate))
+    {
+        max_hashrate = command_line::get_arg(vm, arg_max_hashrate);
     }
+
+    for (; bl.nonce != std::numeric_limits<uint32_t>::max(); bl.nonce++)
+    {
+        crypto::hash h;
+        gbh(bl, height, seed_hash, diffic <= 100 ? 0 : tools::get_max_concurrency(), h);
+        hash_count++;
+
+        if (check_hash(h, diffic))
+        {
+            bl.invalidate_hashes();
+            auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            bl.miner_hashrate = (elapsed_seconds > 0) ? hash_count / elapsed_seconds : 0;
+            return true;
+        }
+
+        // Limite de hashrate (ajout d'un délai artificiel)
+        if (hash_count % 1000 == 0)
+        {
+            auto elapsed_time = std::chrono::steady_clock::now() - start_time;
+            uint64_t current_hashrate = hash_count / 
+                std::chrono::duration_cast<std::chrono::seconds>(elapsed_time).count();
+
+            if (current_hashrate > max_hashrate)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    }
+
     bl.invalidate_hashes();
     return false;
-  }
-  //-----------------------------------------------------------------------------------------------------
+}  //-----------------------------------------------------------------------------------------------------
   void miner::on_synchronized()
   {
     if(m_do_mining)

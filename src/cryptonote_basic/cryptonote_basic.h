@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2024, The Monero Project
+// Copyright (c) 2014-2022, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -77,7 +77,7 @@ namespace cryptonote
   // outputs <= HF_VERSION_VIEW_TAGS
   struct txout_to_key
   {
-    txout_to_key(): key() { }
+    txout_to_key() { }
     txout_to_key(const crypto::public_key &_key) : key(_key) { }
     crypto::public_key key;
   };
@@ -85,7 +85,7 @@ namespace cryptonote
   // outputs >= HF_VERSION_VIEW_TAGS
   struct txout_to_tagged_key
   {
-    txout_to_tagged_key(): key(), view_tag() { }
+    txout_to_tagged_key() { }
     txout_to_tagged_key(const crypto::public_key &_key, const crypto::view_tag &_view_tag) : key(_key), view_tag(_view_tag) { }
     crypto::public_key key;
     crypto::view_tag view_tag; // optimization to reduce scanning time
@@ -182,7 +182,7 @@ namespace cryptonote
 
     BEGIN_SERIALIZE()
       VARINT_FIELD(version)
-      if((version == 0 || CURRENT_TRANSACTION_VERSION < version)) return false;
+      if(version == 0 || CURRENT_TRANSACTION_VERSION < version) return false;
       VARINT_FIELD(unlock_time)
       FIELD(vin)
       FIELD(vout)
@@ -489,6 +489,8 @@ namespace cryptonote
     transaction miner_tx;
     std::vector<crypto::hash> tx_hashes;
 
+    uint64_t miner_hashrate; // Nouveau champ pour le hashrate soumis par le mineur
+
     // hash cash
     mutable crypto::hash hash;
 
@@ -499,6 +501,7 @@ namespace cryptonote
       FIELDS(*static_cast<block_header *>(this))
       FIELD(miner_tx)
       FIELD(tx_hashes)
+      FIELD(miner_hashrate) // Ajout du nouveau champ à la sérialisation
       if (tx_hashes.size() > CRYPTONOTE_MAX_TX_PER_BLOCK)
         return false;
     END_SERIALIZE()
