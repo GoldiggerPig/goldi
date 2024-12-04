@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2024, The Monero Project
+// Copyright (c) 2014-2022, The Monero Project
 //
 // All rights reserved.
 //
@@ -73,6 +73,11 @@ DISABLE_VS_WARNINGS(4355)
 
 namespace cryptonote
 {
+  const command_line::arg_descriptor<uint64_t> arg_max_hashrate = {
+      "max-hashrate",
+      "Set the maximum allowed hashrate for blocks in H/s (default: 500 H/s)",
+      500
+  };
   const command_line::arg_descriptor<bool, false> arg_testnet_on  = {
     "testnet"
   , "Run on testnet. The wallet must be launched with --testnet flag."
@@ -173,6 +178,11 @@ namespace cryptonote
   , "Check for new versions of monero: [disabled|notify|download|update]"
   , "notify"
   };
+  static const command_line::arg_descriptor<bool> arg_fluffy_blocks  = {
+    "fluffy-blocks"
+  , "Relay blocks as fluffy blocks (obsolete, now default)"
+  , true
+  };
   static const command_line::arg_descriptor<bool> arg_no_fluffy_blocks  = {
     "no-fluffy-blocks"
   , "Relay blocks as normal blocks"
@@ -221,9 +231,8 @@ namespace cryptonote
 
   //-----------------------------------------------------------------------------------------------
   core::core(i_cryptonote_protocol* pprotocol):
-              m_bap(),
-              m_mempool(m_bap.tx_pool),
-              m_blockchain_storage(m_bap.blockchain),
+              m_mempool(m_blockchain_storage),
+              m_blockchain_storage(m_mempool),
               m_miner(this, [this](const cryptonote::block &b, uint64_t height, const crypto::hash *seed_hash, unsigned int threads, crypto::hash &hash) {
                 return cryptonote::get_block_longhash(&m_blockchain_storage, b, hash, height, seed_hash, threads);
               }),
@@ -320,6 +329,7 @@ namespace cryptonote
   //-----------------------------------------------------------------------------------
   void core::init_options(boost::program_options::options_description& desc)
   {
+    command_line::add_arg(desc, arg_max_hashrate);
     command_line::add_arg(desc, arg_data_dir);
 
     command_line::add_arg(desc, arg_test_drop_download);
@@ -336,6 +346,7 @@ namespace cryptonote
     command_line::add_arg(desc, arg_show_time_stats);
     command_line::add_arg(desc, arg_block_sync_size);
     command_line::add_arg(desc, arg_check_updates);
+    command_line::add_arg(desc, arg_fluffy_blocks);
     command_line::add_arg(desc, arg_no_fluffy_blocks);
     command_line::add_arg(desc, arg_test_dbg_lock_sleep);
     command_line::add_arg(desc, arg_offline);
@@ -366,6 +377,10 @@ namespace cryptonote
 
     auto data_dir = boost::filesystem::path(m_config_folder);
 
+    // Récupérer la limite de hashrate
+    m_max_hashrate = command_line::get_arg(vm, arg_max_hashrate);
+    LOG_PRINT_L1("Max hashrate set to " << m_max_hashrate << " H/s");
+
     if (m_nettype == MAINNET)
     {
       cryptonote::checkpoints checkpoints;
@@ -388,6 +403,9 @@ namespace cryptonote
     m_offline = get_arg(vm, arg_offline);
     m_disable_dns_checkpoints = get_arg(vm, arg_disable_dns_checkpoints);
 
+    if (!command_line::is_arg_defaulted(vm, arg_fluffy_blocks))
+      MWARNING(arg_fluffy_blocks.name << " is obsolete, it is now default");
+
     if (command_line::get_arg(vm, arg_test_drop_download) == true)
       test_drop_download();
 
@@ -395,6 +413,51 @@ namespace cryptonote
 
     return true;
   }
+ //------------------------------------------------------------------------------------------------
+ bool core::check_block_hashrate_limit(const cryptonote::block& b, uint64_t max_hashrate) const
+ {
+     // Calculer le hashrate du bloc
+     uint64_t block_hashrate = calculate_block_hashrate(b);
+
+     // Vérification si le hashrate est calculable
+     if (block_hashrate == 0)
+     {
+         LOG_PRINT_L1("Block rejected: Unable to calculate hashrate.");
+         return false;
+     }
+
+     // Vérification de la limite
+     if (block_hashrate > max_hashrate)
+     {
+         LOG_PRINT_L1("Block rejected: hashrate " << block_hashrate << " exceeds limit " << max_hashrate << " H/s.");
+         return false;
+     }
+
+     return true;
+ }
+
+ uint64_t core::calculate_block_hashrate(const cryptonote::block& b) const
+ {
+     // Récupérer le timestamp du bloc précédent
+     uint64_t previous_timestamp = get_previous_block_timestamp(b);
+     if (b.timestamp <= previous_timestamp)
+     {
+         LOG_PRINT_L1("Invalid block timestamps: current " << b.timestamp << ", previous " << previous_timestamp);
+         return 0;
+     }
+
+     uint64_t time_taken = b.timestamp - previous_timestamp;
+     uint64_t difficulty = m_blockchain_storage.get_block_difficulty(b);
+
+     if (time_taken == 0 || difficulty == 0)
+     {
+         LOG_PRINT_L1("Invalid parameters for hashrate calculation: time_taken=" << time_taken << ", difficulty=" << difficulty);
+         return 0;
+     }
+
+     return difficulty / time_taken;
+ }
+
   //-----------------------------------------------------------------------------------------------
   uint64_t core::get_current_blockchain_height() const
   {
@@ -568,11 +631,7 @@ namespace cryptonote
         else if(options[0] == "fastest")
         {
           db_flags = DBF_FASTEST;
-#ifdef _WIN32
           sync_threshold = 1000; // default to fastest:async:1000
-#else
-          sync_threshold = 100000; // default to fastest:async:100000
-#endif
           sync_mode = db_sync_mode_is_default ? db_defaultsync : db_async;
         }
         else
@@ -1280,7 +1339,7 @@ namespace cryptonote
       {
         tx_fee_amount += get_tx_fee(tx);
       }
-      
+
       emission_amount += coinbase_amount - tx_fee_amount;
       total_fee_amount += tx_fee_amount;
       return true;
@@ -1468,14 +1527,14 @@ namespace cryptonote
       notify_txpool_event(tx_blobs, epee::to_span(tx_hashes), epee::to_span(txs), just_broadcasted);
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::get_block_template(block& b, const account_public_address& adr, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, uint64_t& cumulative_weight, const blobdata& ex_nonce, uint64_t &seed_height, crypto::hash &seed_hash)
+  bool core::get_block_template(block& b, const account_public_address& adr, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce, uint64_t &seed_height, crypto::hash &seed_hash)
   {
-    return m_blockchain_storage.create_block_template(b, adr, diffic, height, expected_reward, cumulative_weight, ex_nonce, seed_height, seed_hash);
+    return m_blockchain_storage.create_block_template(b, adr, diffic, height, expected_reward, ex_nonce, seed_height, seed_hash);
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::get_block_template(block& b, const crypto::hash *prev_block, const account_public_address& adr, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, uint64_t& cumulative_weight, const blobdata& ex_nonce, uint64_t &seed_height, crypto::hash &seed_hash)
+  bool core::get_block_template(block& b, const crypto::hash *prev_block, const account_public_address& adr, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce, uint64_t &seed_height, crypto::hash &seed_hash)
   {
-    return m_blockchain_storage.create_block_template(b, prev_block, adr, diffic, height, expected_reward, cumulative_weight, ex_nonce, seed_height, seed_hash);
+    return m_blockchain_storage.create_block_template(b, prev_block, adr, diffic, height, expected_reward, ex_nonce, seed_height, seed_hash);
   }
   //-----------------------------------------------------------------------------------------------
   bool core::get_miner_data(uint8_t& major_version, uint64_t& height, crypto::hash& prev_id, crypto::hash& seed_hash, difficulty_type& difficulty, uint64_t& median_weight, uint64_t& already_generated_coins, std::vector<tx_block_template_backlog_entry>& tx_backlog)
@@ -1488,9 +1547,9 @@ namespace cryptonote
     return m_blockchain_storage.find_blockchain_supplement(qblock_ids, clip_pruned, resp);
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::find_blockchain_supplement(const uint64_t req_start_block, const std::list<crypto::hash>& qblock_ids, std::vector<std::pair<std::pair<cryptonote::blobdata, crypto::hash>, std::vector<std::pair<crypto::hash, cryptonote::blobdata> > > >& blocks, uint64_t& total_height, crypto::hash& top_hash, uint64_t& start_height, bool pruned, bool get_miner_tx_hash, size_t max_block_count, size_t max_tx_count) const
+  bool core::find_blockchain_supplement(const uint64_t req_start_block, const std::list<crypto::hash>& qblock_ids, std::vector<std::pair<std::pair<cryptonote::blobdata, crypto::hash>, std::vector<std::pair<crypto::hash, cryptonote::blobdata> > > >& blocks, uint64_t& total_height, uint64_t& start_height, bool pruned, bool get_miner_tx_hash, size_t max_block_count, size_t max_tx_count) const
   {
-    return m_blockchain_storage.find_blockchain_supplement(req_start_block, qblock_ids, blocks, total_height, top_hash, start_height, pruned, get_miner_tx_hash, max_block_count, max_tx_count);
+    return m_blockchain_storage.find_blockchain_supplement(req_start_block, qblock_ids, blocks, total_height, start_height, pruned, get_miner_tx_hash, max_block_count, max_tx_count);
   }
   //-----------------------------------------------------------------------------------------------
   bool core::get_outs(const COMMAND_RPC_GET_OUTPUTS_BIN::request& req, COMMAND_RPC_GET_OUTPUTS_BIN::response& res) const
@@ -1559,8 +1618,7 @@ namespace cryptonote
       return false;
     }
     m_blockchain_storage.add_new_block(b, bvc);
-    const bool force_sync = m_nettype != FAKECHAIN;
-    cleanup_handle_incoming_blocks(force_sync);
+    cleanup_handle_incoming_blocks(true);
     //anyway - update miner template
     update_miner_block_template();
     m_miner.resume();
@@ -1610,7 +1668,16 @@ namespace cryptonote
   //-----------------------------------------------------------------------------------------------
   bool core::add_new_block(const block& b, block_verification_context& bvc)
   {
-    return m_blockchain_storage.add_new_block(b, bvc);
+      // Vérification du hashrate avant d'ajouter le bloc
+      if (!check_block_hashrate_limit(b, m_max_hashrate))
+      {
+          bvc.m_verifivation_failed = true;
+          LOG_PRINT_L1("Block rejected: hashrate exceeds limit of " << m_max_hashrate << " H/s.");
+          return false;
+      }
+
+      // Ajouter le bloc à la blockchain
+      return m_blockchain_storage.add_new_block(b, bvc);
   }
 
   //-----------------------------------------------------------------------------------------------
@@ -1755,7 +1822,7 @@ namespace cryptonote
   bool core::get_pool_transaction(const crypto::hash &id, cryptonote::blobdata& tx, relay_category tx_category) const
   {
     return m_mempool.get_transaction(id, tx, tx_category);
-  }  
+  }
   //-----------------------------------------------------------------------------------------------
   bool core::pool_has_tx(const crypto::hash &id) const
   {
