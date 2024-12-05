@@ -60,6 +60,8 @@ uint64_t get_ns_count() {
         .count();
 }
 
+std::atomic<uint64_t> miner::m_max_hashrate(500); // Valeur par défaut
+
 #ifdef __APPLE__
   #include <sys/times.h>
   #include <IOKit/IOKitLib.h>
@@ -145,7 +147,6 @@ namespace cryptonote
     m_block_reward(0)
   {
     m_attrs.set_stack_size(THREAD_STACK_SIZE);
-    m_max_hashrate.store(500); // Valeur par d�faut
   }
   //-----------------------------------------------------------------------------------------------------
   miner::~miner()
@@ -227,7 +228,7 @@ namespace cryptonote
   {
     if(m_last_hr_merge_time && is_mining())
     {
-      m_current_hash_rate = m_hashes * 1000 / ((misc_utils::get_tick_count() - m_last_hr_merge_time + 1));
+      m_current_hash_rate = m_hashes * 1000 / ((get_tick_count() - m_last_hr_merge_time + 1));
       CRITICAL_REGION_LOCAL(m_last_hash_rates_lock);
       m_last_hash_rates.push_back(m_current_hash_rate);
       if(m_last_hash_rates.size() > 19)
@@ -241,7 +242,7 @@ namespace cryptonote
         std::cout << "hashrate: " << std::setprecision(4) << std::fixed << hr << std::setiosflags(flags) << std::setprecision(precision) << ENDL;
       }
     }
-    m_last_hr_merge_time = misc_utils::get_tick_count();
+    m_last_hr_merge_time = get_tick_count();
     m_hashes = 0;
   }
   //-----------------------------------------------------------------------------------------------------
@@ -281,7 +282,7 @@ namespace cryptonote
     if (!found)
     {
       // setup one more thread
-      m_threads_autodetect.push_back({now, m_total_hashes});
+      m_threads_autodetect.push_back(std::make_pair(now, m_total_hashes));
       m_threads_total = m_threads_autodetect.size();
     }
 
@@ -317,11 +318,11 @@ namespace cryptonote
 
     if (command_line::has_arg(vm, arg_max_hashrate))
     {
-        m_max_hashrate = command_line::get_arg(vm, arg_max_hashrate);
+        miner::m_max_hashrate = command_line::get_arg(vm, arg_max_hashrate);
     }
     else
     {
-        m_max_hashrate = 500; // Valeur par d�faut
+        miner::m_max_hashrate = 500; // Valeur par d�faut
     }
 
     if(command_line::has_arg(vm, arg_extra_messages))
@@ -403,7 +404,7 @@ namespace cryptonote
     if (threads_count == 0)
     {
       m_threads_autodetect.clear();
-      m_threads_autodetect.push_back({epee::misc_utils::get_ns_count(), m_total_hashes});
+      m_threads_autodetect.push_back(std::make_pair(get_ns_count(), m_total_hashes));
       m_threads_total = 1;
     }
     m_starter_nonce = crypto::rand<uint32_t>();
@@ -504,7 +505,7 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
 {
     auto start_time = std::chrono::steady_clock::now();
     uint64_t hash_count = 0;
-    uint64_t max_hashrate = m_max_hashrate.load();
+    uint64_t max_hashrate = miner::m_max_hashrate.load();
 
     // Pour rendre configurable la limite de hashrate
     if (command_line::has_arg(vm, arg_max_hashrate))
