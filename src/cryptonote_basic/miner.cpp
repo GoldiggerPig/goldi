@@ -60,6 +60,10 @@ uint64_t get_ns_count() {
         .count();
 }
 
+uint64_t calculate_block_hashrate(uint64_t hash_count, uint64_t elapsed_seconds) {
+    return (elapsed_seconds > 0) ? hash_count / elapsed_seconds : 0;
+}
+
 std::atomic<uint64_t> miner::m_max_hashrate(500); // Valeur par défaut
 
 #ifdef __APPLE__
@@ -404,7 +408,7 @@ namespace cryptonote
     if (threads_count == 0)
     {
       m_threads_autodetect.clear();
-      m_threads_autodetect.push_back(std::make_pair(get_ns_count(), m_total_hashes));
+      m_threads_autodetect.push_back(std::make_pair(get_ns_count(), m_total_hashes.load()));
       m_threads_total = 1;
     }
     m_starter_nonce = crypto::rand<uint32_t>();
@@ -524,7 +528,7 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
             bl.invalidate_hashes();
             auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start_time).count();
-            bl.miner_hashrate = (elapsed_seconds > 0) ? hash_count / elapsed_seconds : 0;
+            bl.miner_hashrate = calculate_block_hashrate(hash_count, elapsed_seconds);
             return true;
         }
 
@@ -599,7 +603,7 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
       }
       else if( m_is_background_mining_enabled )
       {
-        std::this_thread::sleep_for(std::chrono::milliseconds(m_miner_extra_sleep);
+        std::this_thread::sleep_for(std::chrono::milliseconds(m_miner_extra_sleep));
         while( !m_is_background_mining_started )
         {
           MGINFO("background mining is enabled, but not started, waiting until start triggers");
