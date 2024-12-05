@@ -44,6 +44,21 @@
 #include "storages/portable_storage_template_helper.h"
 #include "boost/logic/tribool.hpp"
 #include <boost/filesystem.hpp>
+#include <atomic>
+#include <chrono>
+#include <thread>
+
+uint64_t get_tick_count() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+uint64_t get_ns_count() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 #ifdef __APPLE__
   #include <sys/times.h>
@@ -96,7 +111,7 @@ namespace cryptonote
     const command_line::arg_descriptor<std::string> arg_start_mining =    {"start-mining", "Specify wallet address to mining for", "", true};
     const command_line::arg_descriptor<uint32_t>      arg_mining_threads =  {"mining-threads", "Specify mining threads count", 0, true};
     const command_line::arg_descriptor<bool>        arg_bg_mining_enable =  {"bg-mining-enable", "enable background mining", true, true};
-    const command_line::arg_descriptor<bool>        arg_bg_mining_ignore_battery =  {"bg-mining-ignore-battery", "if true, assumes plugged in when unable to query system power status", false, true};    
+    const command_line::arg_descriptor<bool>        arg_bg_mining_ignore_battery =  {"bg-mining-ignore-battery", "if true, assumes plugged in when unable to query system power status", false, true};
     const command_line::arg_descriptor<uint64_t>    arg_bg_mining_min_idle_interval_seconds =  {"bg-mining-min-idle-interval", "Specify min lookback interval in seconds for determining idle state", miner::BACKGROUND_MINING_DEFAULT_MIN_IDLE_INTERVAL_IN_SECONDS, true};
     const command_line::arg_descriptor<uint16_t>     arg_bg_mining_idle_threshold_percentage =  {"bg-mining-idle-threshold", "Specify minimum avg idle percentage over lookback interval", miner::BACKGROUND_MINING_DEFAULT_IDLE_THRESHOLD_PERCENTAGE, true};
     const command_line::arg_descriptor<uint16_t>     arg_bg_mining_miner_target_percentage =  {"bg-mining-miner-target", "Specify maximum percentage cpu use by miner(s)", miner::BACKGROUND_MINING_DEFAULT_MINING_TARGET_PERCENTAGE, true};
@@ -127,10 +142,10 @@ namespace cryptonote
     m_idle_threshold(BACKGROUND_MINING_DEFAULT_IDLE_THRESHOLD_PERCENTAGE),
     m_mining_target(BACKGROUND_MINING_DEFAULT_MINING_TARGET_PERCENTAGE),
     m_miner_extra_sleep(BACKGROUND_MINING_DEFAULT_MINER_EXTRA_SLEEP_MILLIS),
-    m_block_reward(0),
-    m_max_hashrate.store(500); // Valeur par défaut
+    m_block_reward(0)
   {
     m_attrs.set_stack_size(THREAD_STACK_SIZE);
+    m_max_hashrate.store(500); // Valeur par dï¿½faut
   }
   //-----------------------------------------------------------------------------------------------------
   miner::~miner()
@@ -235,7 +250,7 @@ namespace cryptonote
     if (m_threads_autodetect.empty())
       return;
 
-    uint64_t now = epee::misc_utils::get_ns_count();
+    uint64_t now = get_ns_count();
     uint64_t dt = now - m_threads_autodetect.back().first;
     if (dt < AUTODETECT_WINDOW * 1000000000ull)
       return;
@@ -275,7 +290,7 @@ namespace cryptonote
       CRITICAL_REGION_LOCAL(m_threads_lock);
       m_stop = true;
       while (m_threads_active > 0)
-        misc_utils::sleep_no_w(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
       m_threads.clear();
     }
     m_stop = false;
@@ -290,7 +305,7 @@ namespace cryptonote
     command_line::add_arg(desc, arg_start_mining);
     command_line::add_arg(desc, arg_mining_threads);
     command_line::add_arg(desc, arg_bg_mining_enable);
-    command_line::add_arg(desc, arg_bg_mining_ignore_battery);    
+    command_line::add_arg(desc, arg_bg_mining_ignore_battery);
     command_line::add_arg(desc, arg_bg_mining_min_idle_interval_seconds);
     command_line::add_arg(desc, arg_bg_mining_idle_threshold_percentage);
     command_line::add_arg(desc, arg_bg_mining_miner_target_percentage);
@@ -306,7 +321,7 @@ namespace cryptonote
     }
     else
     {
-        m_max_hashrate = 500; // Valeur par défaut
+        m_max_hashrate = 500; // Valeur par dï¿½faut
     }
 
     if(command_line::has_arg(vm, arg_extra_messages))
@@ -355,7 +370,7 @@ namespace cryptonote
     if(command_line::has_arg(vm, arg_bg_mining_enable))
       set_is_background_mining_enabled( command_line::get_arg(vm, arg_bg_mining_enable) );
     if(command_line::has_arg(vm, arg_bg_mining_ignore_battery))
-      set_ignore_battery( command_line::get_arg(vm, arg_bg_mining_ignore_battery) );      
+      set_ignore_battery( command_line::get_arg(vm, arg_bg_mining_ignore_battery) );
     if(command_line::has_arg(vm, arg_bg_mining_min_idle_interval_seconds))
       set_min_idle_seconds( command_line::get_arg(vm, arg_bg_mining_min_idle_interval_seconds) );
     if(command_line::has_arg(vm, arg_bg_mining_idle_threshold_percentage))
@@ -411,7 +426,7 @@ namespace cryptonote
     m_thread_index = 0;
     set_is_background_mining_enabled(do_background);
     set_ignore_battery(ignore_battery);
-    
+
     for(size_t i = 0; i != m_threads_total; i++)
     {
       m_threads.push_back(boost::thread(m_attrs, boost::bind(&miner::worker_thread, this)));
@@ -466,11 +481,11 @@ namespace cryptonote
     send_stop_signal();
 
     // In case background mining was active and the miner threads are waiting
-    // on the background miner to signal start. 
+    // on the background miner to signal start.
     while (m_threads_active > 0)
     {
       m_is_background_mining_started_cond.notify_all();
-      misc_utils::sleep_no_w(100);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     // The background mining thread could be sleeping for a long time, so we
@@ -512,11 +527,11 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
             return true;
         }
 
-        // Limite de hashrate (ajout d'un délai artificiel)
+        // Limite de hashrate (ajout d'un dï¿½lai artificiel)
         if (hash_count % 1000 == 0)
         {
             auto elapsed_time = std::chrono::steady_clock::now() - start_time;
-            uint64_t current_hashrate = hash_count / 
+            uint64_t current_hashrate = hash_count /
                 std::chrono::duration_cast<std::chrono::seconds>(elapsed_time).count();
 
             if (current_hashrate > max_hashrate)
@@ -578,21 +593,21 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
     {
       if(m_pausers_count)//anti split workaround
       {
-        misc_utils::sleep_no_w(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         continue;
       }
       else if( m_is_background_mining_enabled )
       {
-        misc_utils::sleep_no_w(m_miner_extra_sleep);
+        std::this_thread::sleep_for(std::chrono::milliseconds(m_miner_extra_sleep);
         while( !m_is_background_mining_started )
         {
           MGINFO("background mining is enabled, but not started, waiting until start triggers");
-          boost::unique_lock<boost::mutex> started_lock( m_is_background_mining_started_mutex );        
+          boost::unique_lock<boost::mutex> started_lock( m_is_background_mining_started_mutex );
           m_is_background_mining_started_cond.wait( started_lock );
           if( m_stop ) break;
         }
-        
-        if( m_stop ) continue;         
+
+        if( m_stop ) continue;
       }
 
       if(local_template_ver != m_template_no)
@@ -609,7 +624,7 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
       if(!local_template_ver)//no any set_block_template call
       {
         LOG_PRINT_L2("Block template not set yet");
-        epee::misc_utils::sleep_no_w(1000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         continue;
       }
 
@@ -658,7 +673,7 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
   bool miner::get_ignore_battery() const
   {
     return m_ignore_battery;
-  }  
+  }
   //-----------------------------------------------------------------------------------------------------
   /**
   * This has differing behaviour depending on if mining has been started/etc.
@@ -729,10 +744,10 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
       LOG_ERROR("get_system_times call failed, background mining will NOT work!");
       return false;
     }
-    
+
     while(!m_stop)
     {
-        
+
       try
       {
         // Commenting out the below since we're going with privatizing the bg mining enabled
@@ -745,19 +760,19 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
         // you've clicked "start mining". There's still an issue here where if background
         // mining is disabled when start is called, this thread is never created, and so
         // enabling after does nothing, something I have to fix in the future. However,
-        // this should take care of the case where mining is started with bg-enabled, 
+        // this should take care of the case where mining is started with bg-enabled,
         // and then the user decides to un-check background mining, and just do
-        // regular full-speed mining. I might just be over-doing it and thinking up 
+        // regular full-speed mining. I might just be over-doing it and thinking up
         // non-existant use-cases, so if the consensus is to simplify, we can remove all this fluff.
         /*
         while( !m_is_background_mining_enabled )
         {
           MGINFO("background mining is disabled, waiting until enabled!");
-          boost::unique_lock<boost::mutex> enabled_lock( m_is_background_mining_enabled_mutex );        
+          boost::unique_lock<boost::mutex> enabled_lock( m_is_background_mining_enabled_mutex );
           m_is_background_mining_enabled_cond.wait( enabled_lock );
-        } 
-        */       
-        
+        }
+        */
+
         // If we're already mining, then sleep for the miner monitor interval.
         // If we're NOT mining, then sleep for the idle monitor interval
         uint64_t sleep_for_seconds = BACKGROUND_MINING_MINER_MONITOR_INVERVAL_IN_SECONDS;
@@ -783,7 +798,7 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
       if( m_is_background_mining_started )
       {
         // figure out if we need to stop, and monitor mining usage
-        
+
         // If we get here, then previous values are initialized.
         // Let's get some current data for comparison.
 
@@ -828,7 +843,7 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
           m_miner_extra_sleep = std::max( new_miner_extra_sleep , (int64_t)5 );
           MDEBUG("m_miner_extra_sleep " << m_miner_extra_sleep);
         }
-        
+
         prev_total_time = current_total_time;
         prev_idle_time = current_idle_time;
       }
@@ -927,7 +942,7 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
 
       mach_msg_type_number_t count;
       kern_return_t status;
-      host_cpu_load_info_data_t stats;      
+      host_cpu_load_info_data_t stats;
       count = HOST_CPU_LOAD_INFO_COUNT;
       status = host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&stats, &count);
       if(status != KERN_SUCCESS)
@@ -937,7 +952,7 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
 
       idle_time = stats.cpu_ticks[CPU_STATE_IDLE];
       total_time = idle_time + stats.cpu_ticks[CPU_STATE_USER] + stats.cpu_ticks[CPU_STATE_SYSTEM];
-      
+
       return true;
 
     #elif defined(__FreeBSD__)
@@ -1002,12 +1017,12 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
 
     return false; // unsupported system
   }
-  //-----------------------------------------------------------------------------------------------------  
+  //-----------------------------------------------------------------------------------------------------
   uint8_t miner::get_percent_of_total(uint64_t other, uint64_t total)
   {
-    return (uint8_t)( ceil( (other * 1.f / total * 1.f) * 100) );    
+    return (uint8_t)( ceil( (other * 1.f / total * 1.f) * 100) );
   }
-  //-----------------------------------------------------------------------------------------------------    
+  //-----------------------------------------------------------------------------------------------------
   boost::logic::tribool miner::on_battery_power()
   {
     #ifdef _WIN32
@@ -1018,8 +1033,8 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
         return boost::logic::tribool(power_status.ACLineStatus != 1);
     	}
 
-    #elif defined(__APPLE__) 
-      
+    #elif defined(__APPLE__)
+
       #if TARGET_OS_MAC && (!defined(MAC_OS_X_VERSION_MIN_REQUIRED) || MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_7)
         return boost::logic::tribool(IOPSGetTimeRemainingEstimate() != kIOPSTimeRemainingUnlimited);
       #else
@@ -1183,7 +1198,7 @@ bool miner::find_nonce_for_given_block(const get_block_hash_t &gbh, block& bl, c
       }
       return boost::logic::tribool(ac == 0);
     #endif
-    
+
     LOG_ERROR("couldn't query power status");
     return boost::logic::tribool(boost::logic::indeterminate);
   }
